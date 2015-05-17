@@ -5,19 +5,9 @@
 Welcome to the documentation for pyghost!
 ====================================
 
-Contents:
-
 .. toctree::
    :maxdepth: 2
 
    intro
    ghostsim
-
-
-Indices and tables
-==================
-
-* :ref:`genindex`
-* :ref:`modindex`
-* :ref:`search`
 
