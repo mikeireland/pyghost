@@ -17,12 +17,14 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import optics
+import os
+import pdb
 try:
     import pyfits
 except:
     import astropy.io.fits as pyfits
 
-class ARM():
+class Arm():
     """A class for each arm of the spectrograph. The initialisation function takes a 
     single string representing the configuration. For GHOST, it can be "red" or "blue"."""
     
@@ -39,6 +41,7 @@ class ARM():
         self.microns_pix = 2.0  #When simulating the slit image, use this many microns per pixel
         self.microns_arcsec = 400.0 #Number of microns in the slit image plane per arcsec
         if (arm == 'red'):
+            self.extra_rot = 3.0   #Additional slit rotation across an order needed to match Zemax.
             self.szx = 6144
             self.szy = 6144
             self.f_cam = 264.0
@@ -51,6 +54,7 @@ class ARM():
             self.m_min = 34
             self.m_max = 67
         elif (arm == 'blue'):
+            self.extra_rot = 2.0   #Additional slit rotation accross an order needed to match Zemax.
             self.szx = 4096
             self.szy = 4096
             self.f_cam = 264.0
@@ -106,7 +110,7 @@ class ARM():
         u = np.array([u1,u2,u3])
         l = np.array([1.0,0,0])
         s = np.array([0,np.cos(np.radians(self.theta)), -np.sin(np.radians(self.theta))])
-        #Orders for each wavelength. We choose 2.
+        #Orders for each wavelength. We choose +/- 1 free spectral range.
         ms = np.arange(self.m_min,self.m_max+1)
         wave_mins = 2*self.d*np.sin(np.radians(self.theta))/(ms + 1.0)
         wave_maxs = 2*self.d*np.sin(np.radians(self.theta))/(ms - 1.0)
@@ -122,17 +126,22 @@ class ARM():
         v = np.zeros( (3,nl) )
         for i in range(nl):
             v[:,i] = optics.grating_sim(u,l,s,ml_d[i])
-        ## Find the current mean direction in the x-z plane, and
-        ## magnify the angles
+        ## Find the current mean direction in the x-z plane, and magnify
+        ## the angles to represent passage through the beam reducer.
         if len(ccd_centre)==0:
             mean_v = np.mean(v,axis=1)
-            ## Next two lines are slightly dodgy I think. !!!
+            ## As the range of angles is so large in the y direction, the mean
+            ## will depend on the wavelength sampling within an order. So just consider
+            ## a horizontal beam.
             mean_v[1] = 0
+            ## Re-normalise this mean direction vector
             mean_v /= np.sqrt(np.sum(mean_v**2))
         else:
             mean_v = ccd_centre['mean_v']
         for i in range(nl):
+            ## Expand the range of angles around the mean direction.
             temp = mean_v + (v[:,i]-mean_v)*self.assym
+            ## Re-normalise.
             v[:,i] = temp/np.sum(temp**2)
         
         ## Here we diverge from Veloce. We will ignore the glass, and 
@@ -164,7 +173,7 @@ class ARM():
         xpx = np.zeros(nl)
         ypx = np.zeros(nl)
         xy = np.zeros(2)
-        #!!! There is definitely a more vectorised way to do this. 
+        ## There is definitely a more vectorised way to do this. 
         for i in range(nl):
             xy[0] = np.dot(ccdx,w[:,i])*self.f_cam/self.px_sz
             xy[1] = np.dot(ccdy,w[:,i])*self.f_cam/self.px_sz
@@ -174,15 +183,15 @@ class ARM():
             xy = np.dot(rot_matrix,xy)
             xpx[i]=xy[0]
             ypx[i]=xy[1]
-        #Dodgy next line to center spectra!!! But of course, not taking account distortion
-        #is dodgy anyway.
+        ## Center the spectra on the CCD in the x-direction.
         if len(ccd_centre)==0:
             w = np.where( (ypx < self.szy/2) * (ypx > -self.szy/2) )[0]
             xpix_offset = 0.5*( np.min(xpx[w]) + np.max(xpx[w]) )
         else:
             xpix_offset=ccd_centre['xpix_offset']
         xpx -= xpix_offset
-        #Now lets interpolate. 
+        ## Now lets interpolate onto a pixel grid rather than the arbitrary wavelength
+        ## grid we began with.
         nm = self.m_max-self.m_min+1
         x_int = np.zeros( (nm,self.szy) )
         wave_int = np.zeros((nm,self.szy) )
@@ -223,33 +232,49 @@ class ARM():
         x_yp,w_yp,b_yp,dummy = self.spectral_format(yoff=-1e-3,ccd_centre=ccd_centre)
         dy_dyoff = np.zeros(x.shape)
         dy_dxoff = np.zeros(x.shape)
+        #For the y coordinate, spectral_format output the wavelength at fixed pixel, not 
+        #the pixel at fixed wavelength. This means we need to interpolate to find the 
+        #slit to detector transform.
+        isbad = w*w_xp*w_yp == 0
         for i in range(x.shape[0]):
-            dy_dyoff[i,:] =     np.interp(w_yp[i,:],w[i,:],np.arange(x.shape[1])) - np.arange(x.shape[1])
-            dy_dxoff[i,:] =     np.interp(w_xp[i,:],w[i,:],np.arange(x.shape[1])) - np.arange(x.shape[1])
-        #!!! This numerical derivative crashes beyond the end - not sure why.
-        # The fix is a hack!!!
-        dy_dyoff[:,-1] = dy_dyoff[:,-2]
-        dy_dxoff[:,-1] = dy_dxoff[:,-2]
-        
+            ww = np.where(isbad[i,:] == False)[0]
+            dy_dyoff[i,ww] =     np.interp(w_yp[i,ww],w[i,ww],np.arange(len(ww))) - np.arange(len(ww))
+            dy_dxoff[i,ww] =     np.interp(w_xp[i,ww],w[i,ww],np.arange(len(ww))) - np.arange(len(ww))
+            #Interpolation won't work beyond the end, so extrapolate manually (why isn't this a numpy
+            #option???)
+            dy_dyoff[i,ww[-1]] = dy_dyoff[i,ww[-2]]
+            dy_dxoff[i,ww[-1]] = dy_dxoff[i,ww[-2]]
+                    
+        #For dx, no interpolation is needed so the numerical derivative is trivial...
         dx_dxoff = x_xp - x
         dx_dyoff = x_yp - x
+
         #flag bad data...
-        bad = np.where(b*b_xp*b_yp == 0)
-        x[bad] = np.nan
-        w[bad] = np.nan
-        b[bad] = np.nan
-        dy_dyoff[bad] = np.nan
-        dy_dxoff[bad] = np.nan
-        dx_dyoff[bad] = np.nan
-        dx_dxoff[bad] = np.nan
+        x[isbad] = np.nan
+        w[isbad] = np.nan
+        b[isbad] = np.nan
+        dy_dyoff[isbad] = np.nan
+        dy_dxoff[isbad] = np.nan
+        dx_dyoff[isbad] = np.nan
+        dx_dxoff[isbad] = np.nan
         matrices = np.zeros( (x.shape[0],x.shape[1],2,2) )
         amat = np.zeros((2,2))
+
         for i in range(x.shape[0]):
             for j in range(x.shape[1]):
+                ## Create a matrix where we map input angles to output coordinates.
                 amat[0,0] = dx_dxoff[i,j]
                 amat[0,1] = dx_dyoff[i,j]
                 amat[1,0] = dy_dxoff[i,j]
                 amat[1,1] = dy_dyoff[i,j]
+                ## Apply an additional rotation matrix. If the simulation was complete,
+                ## this wouldn't be required.
+                r_rad = np.radians(self.extra_rot)
+                dy_frac = (j - x.shape[1]/2.0)/(x.shape[1]/2.0)
+                extra_rot_mat = np.array([[np.cos(r_rad*dy_frac),np.sin(r_rad*dy_frac)],[-np.sin(r_rad*dy_frac),np.cos(r_rad*dy_frac)]])
+                amat = np.dot(extra_rot_mat,amat)
+                ## We actually want the inverse of this (mapping output coordinates back
+                ## onto the slit.
                 matrices[i,j,:,:] =  np.linalg.inv(amat)
         return x,w,b,matrices
         
@@ -372,7 +397,7 @@ class ARM():
             """
             #If no input spectrum, use the sun.
             if len(spectrum)==0:
-                d =pyfits.getdata('data/ardata.fits.gz')
+                d =pyfits.getdata(os.path.join(os.path.dirname(os.path.abspath(__file__),'data/ardata.fits.gz')))
                 spectrum=np.array([np.append(0.35,d['WAVELENGTH'])/1e4,np.append(0.1,d['SOLARFLUX'])])
             nm = x.shape[0]
             ny = x.shape[1]
@@ -458,7 +483,7 @@ class ARM():
             if (use_thar):
                 #Create an appropriately convolved Thorium-Argon spectrum after appropriately
                 #convolving.
-                thar = np.loadtxt('data/mnras0378-0221-SD1.txt',usecols=[0,1,2])
+                thar = np.loadtxt(os.path.join(os.path.dirname(os.path.abspath(__file__),'data/mnras0378-0221-SD1.txt'),usecols=[0,1,2])
                 thar_wave = 3600 * np.exp(np.arange(5e5)/5e5)
                 thar_flux = np.zeros(5e5)
                 ix = (np.log(thar[:,1]/3600)*5e5).astype(int)
