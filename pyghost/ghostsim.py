@@ -40,6 +40,7 @@ class Arm():
         self.lenslet_std_size = 197.0 #Lenslet flat-to-flat in microns
         self.microns_pix = 2.0  #When simulating the slit image, use this many microns per pixel
         self.microns_arcsec = 400.0 #Number of microns in the slit image plane per arcsec
+        self.im_slit_sz = 2048 #Size of the image slit size in pixels.
         if (arm == 'red'):
             self.extra_rot = 3.0   #Additional slit rotation across an order needed to match Zemax.
             self.szx = 6144
@@ -295,7 +296,9 @@ class Arm():
             
         llet_offset: int
             Offset in lenslets to apply to the input spectrum"""
-        sz = 2048
+        print("Computing a simulated slit image...")
+        szx = self.im_slit_sz
+        szy = 256
         fillfact = 0.98
         s32 = np.sqrt(3)/2
         hex_scale = 1.15
@@ -305,7 +308,7 @@ class Arm():
         elif len(fluxes)==17:
             mode = 'std'
         elif len(mode)==0:
-            print("Error: 27 or 28 lenslets needed... or mode should be set")
+            print("Error: 17 or 28 lenslets needed... or mode should be set")
             raise UserWarning
         if mode=='std':
             nl=17
@@ -315,62 +318,71 @@ class Arm():
         elif mode=='high':
             nl=28
             lenslet_width = self.lenslet_high_size
-            yoffset = (lenslet_width/self.microns_pix/hex_scale*s32*np.array([-2,-2,-2,-1,-1,-1,-1,0,0,0,0,0,1,1,1,1,2,2,2])).astype(int)
-            xoffset = (lenslet_width/self.microns_pix/hex_scale*0.5*np.array([-2,0,2,-3,-1,1,3,-4,-2,0,2,4,-3,-1,1,3,-2,0,2])).astype(int)
+            yoffset = (lenslet_width/self.microns_pix/hex_scale*s32*np.array([-2,2,-2,-1,-1,0,-1,-1,0,0,0,1,1,0,1,1,2,-2,2])).astype(int)
+            xoffset = (lenslet_width/self.microns_pix/hex_scale*0.5*np.array([-2,0,2,-3,3,-4,-1,1,-2,0,2,-1,1,4,-3,3,-2,0,2])).astype(int)
         else:
             print("Error: mode must be standard or high")
         
         
         #Some preliminaries...
         cutout_hw = int(lenslet_width/self.microns_pix*1.5)
-        im_slit = np.zeros((sz,sz))
-        x = np.arange(sz) - sz/2.0
-        xy = np.meshgrid(x,x)
+        im_slit = np.zeros((szy,szx))
+        x = np.arange(szx) - szx/2.0
+        y = np.arange(szy) - szy/2.0
+        xy = np.meshgrid(x,y)
+        #r and wr enable the radius from the lenslet center to be indexed
         r = np.sqrt(xy[0]**2 + xy[1]**2)
         wr = np.where(r < 2*lenslet_width/self.microns_pix)
+        #g is a Gaussian used for FRD
         g = np.exp(-r**2/2.0/(conv_fwhm/self.microns_pix/2.35)**2)
         g = np.fft.fftshift(g)
         g /= np.sum(g)
         gft = np.conj(np.fft.rfft2(g))
         pix_size_slit = self.px_sz*(self.f_col/self.assym)/self.f_cam*1000.0/self.microns_pix
-        pix = np.zeros( (sz,sz) )
+        pix = np.zeros( (szy,szx) )
         pix[np.where( (np.abs(xy[0]) < pix_size_slit/2) * (np.abs(xy[1]) < pix_size_slit/2) )] = 1
         pix = np.fft.fftshift(pix)
         pix /= np.sum(pix)
         pix_ft = np.conj(np.fft.rfft2(pix))
-        h = optics.hexagon(sz, lenslet_width/self.microns_pix*fillfact/hex_scale)
-        hbig = optics.hexagon(sz, lenslet_width/self.microns_pix*fillfact)
-        #If we're simulating seeing, create the IFU
+        #Create some hexagons. We go via a "cutout" for efficiency.
+        h_cutout = optics.hexagon(szy, lenslet_width/self.microns_pix*fillfact/hex_scale)
+        hbig_cutout = optics.hexagon(szy, lenslet_width/self.microns_pix*fillfact)
+        h = np.zeros( (szy,szx) )
+        hbig = np.zeros( (szy,szx) )
+        h[:,szx/2-szy/2:szx/2+szy/2] = h_cutout
+        hbig[:,szx/2-szy/2:szx/2+szy/2] = hbig_cutout
         if len(fluxes)!=0:
-            im = np.ones( (sz,sz) )
-            xoffset = np.zeros(len(fluxes)).astype(int)
-            yoffset = np.zeros(len(fluxes)).astype(int)
+            #If we're not simulating seeing, the image-plane is uniform, and we only use
+            #the values of "fluxes" to scale the lenslet fluxes. 
+            im = np.ones( (szy,szx) )
+            #Set the offsets to zero because we may be simulating e.g. a single Th/Ar lenslet
+            #and not starlight (from the default xoffset etc)
+            xoffset = np.zeros(len(fluxes),dtype=int)
+            yoffset = np.zeros(len(fluxes),dtype=int)
         else:
-            #First, create the Moffat function.
-            im = optics.moffat2d(sz,seeing*self.microns_arcsec/self.microns_pix/2, beta=4.0)
-            im_sampled = np.ones((sz,sz))
-            for i in range(len(xoffset)):
-                im_sampled += im*np.roll(np.roll(h,yoffset[i],axis=0),xoffset[i],axis=1)
+            #If we're simulating seeing, create a Moffat function as our input profile, 
+            #but just make the lenslet fluxes uniform.
+            im = np.zeros( (szy,szx) )
+            im_cutout = optics.moffat2d(szy,seeing*self.microns_arcsec/self.microns_pix/2, beta=4.0)
+            im[:,szx/2-szy/2:szx/2+szy/2] = im_cutout
             fluxes = np.ones(len(xoffset))
             
         #Go through the flux vector and fill in each lenslet.
         for i in range(len(fluxes)):
-            im_one = np.zeros((sz,sz))
+            im_one = np.zeros((szy,szx))
             im_cutout = np.roll(np.roll(im,yoffset[i],axis=0),xoffset[i],axis=1)*h
-            im_cutout = im_cutout[sz/2-cutout_hw:sz/2+cutout_hw,sz/2-cutout_hw:sz/2+cutout_hw]
+            im_cutout = im_cutout[szy/2-cutout_hw:szy/2+cutout_hw,szx/2-cutout_hw:szx/2+cutout_hw]
             prof = optics.azimuthalAverage(im_cutout, returnradii=True, binsize=1)
             prof = (prof[0],prof[1]*fluxes[i])
             xprof = np.append(np.append(0,prof[0]),np.max(prof[0])*2)
             yprof = np.append(np.append(prof[1][0],prof[1]),0)
             im_one[wr] = np.interp(r[wr], xprof, yprof)
-            #import pdb; pdb.set_trace()
             im_one = np.fft.irfft2(np.fft.rfft2(im_one)*gft)*hbig
             im_one = np.fft.irfft2(np.fft.rfft2(im_one)*pix_ft)
-            #!!! or add tilt-offsets
+            #!!! The line below could add tilt offsets... important for PRV simulation !!!
             #im_one = np.roll(np.roll(im_one, tilt_offsets[0,i], axis=1),tilt_offsets[1,i], axis=0)*hbig
             the_shift = int( (llet_offset + i - nl/2.0)*lenslet_width/self.microns_pix )
             im_slit += np.roll(im_one,the_shift,axis=1)
-            print('Done lenslet: {0}'.format(i))
         return im_slit
                 
     def simulate_image(self,x,w,b,matrices,im_slit,spectrum=[],nx=0, xshift=0.0, yshift=0.0, rv=0.0):
@@ -404,20 +416,25 @@ class Arm():
             if nx==0:
                 nx = ny
             image = np.zeros( (ny,nx) )
+            #Simulate the slit image within a small cutout region.
             cutout_xy = np.meshgrid( np.arange(81)-40, np.arange(7)-3 )
             #Loop over orders
             for i in range(nm):
                 for j in range(ny):
                     if x[i,j] != x[i,j]:
                         continue
+                    #We are looping through y pixel and order. The x-pixel is therefore non-integer.
+                    #Allow an arbitrary shift of this image.
                     the_x = x[i,j] + xshift
+                    #Create an (x,y) index of the actual pixels we want to index.
                     cutout_shifted = (cutout_xy[0].copy() + int(the_x) + nx/2, \
                                       cutout_xy[1].copy() + j)
                     ww = np.where( (cutout_shifted[0]>=0) * (cutout_shifted[1]>=0) *  \
                                    (cutout_shifted[0]<nx) * (cutout_shifted[1]<ny) )
                     cutout_shifted = (cutout_shifted[0][ww], cutout_shifted[1][ww])
                     flux = np.interp(w[i,j]*(1 + rv/299792458.0),spectrum[0], spectrum[1],left=0,right=0)
-                    #The 1st co-ordinate is x in the matrix.
+                    #Rounded to the nearest microns_pix, find the co-ordinate in the simulated slit image corresponding to 
+                    #each pixel. The co-ordinate order in the matrix is (x,y).
                     xy_scaled = np.dot( matrices[i,j], np.array([cutout_xy[0][ww]+int(the_x)-the_x,cutout_xy[1][ww]])/self.microns_pix ).astype(int)
                     image[cutout_shifted[1],cutout_shifted[0]] += b[i,j]*flux*im_slit[xy_scaled[1] + im_slit.shape[0]/2,xy_scaled[0] + im_slit.shape[1]/2]
                 print('Done order: {0}'.format(i + self.m_min))
@@ -483,7 +500,7 @@ class Arm():
             if (use_thar):
                 #Create an appropriately convolved Thorium-Argon spectrum after appropriately
                 #convolving.
-                thar = np.loadtxt(os.path.join(os.path.dirname(os.path.abspath(__file__),'data/mnras0378-0221-SD1.txt'),usecols=[0,1,2])
+                thar = np.loadtxt(os.path.join(os.path.dirname(os.path.abspath(__file__),'data/mnras0378-0221-SD1.txt')),usecols=[0,1,2])
                 thar_wave = 3600 * np.exp(np.arange(5e5)/5e5)
                 thar_flux = np.zeros(5e5)
                 ix = (np.log(thar[:,1]/3600)*5e5).astype(int)
