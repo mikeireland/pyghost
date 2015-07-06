@@ -57,6 +57,15 @@ class Extractor():
         im_slit_pix_in_microns = (np.arange(self.sim.im_slit_sz) - self.sim.im_slit_sz/2.0) * self.sim.microns_pix
         for i in range(nm):
             self.sim_offsets[:,i] = im_slit_pix_in_microns / self.matrices[i,self.x_map.shape[1]//2,0,0]
+        #To aid in 2D extraction, let's explicitly compute the y offsets corresponding to these x offsets...
+        #The "matrices" map pixels back to slit co-ordinates. 
+        self.slit_tilt = np.zeros( (nm,ny) )
+        for i in range(nm):
+            for j in range(ny):
+                invmat = np.linalg.inv( self.matrices[i,j] )
+                #What happens to the +x direction?
+                x_dir_map = np.dot(invmat,[1,0])
+                self.slit_tilt[i,j] = x_dir_map[1]/x_dir_map[0]
         
     def define_profile(self,fluxes):
         """ Manually define the slit profile as used in lenslet extraction. As this is
@@ -127,6 +136,7 @@ class Extractor():
                 x_ix = int(self.x_map[i,j]) - nx_cutout//2 + np.arange(nx_cutout,dtype=int) + nx//2
                 for k in range(no):
                     phi[:,k] = np.interp(x_ix - self.x_map[i,j] - nx//2, offsets, profile[:,k])
+                    phi[:,k] /= np.sum(phi[:,k])
                 #Deal with edge effects...
                 ww = np.where( (x_ix >= nx) | (x_ix < 0) )[0]
                 x_ix[ww]=0
@@ -137,8 +147,9 @@ class Extractor():
                 #Fill in the "c" matrix and "b" vector from Sharp and Birchall equation 9
                 #Simplify things by writing the sum in the computation of "b" as a matrix
                 #multiplication. We can do this because we're content to invert the 
-                #(small matrix "c" here). Equation 17 from Sharp and Birchall 
-                #doesn't make a lot of sense..
+                #(small) matrix "c" here. Equation 17 from Sharp and Birchall 
+                #doesn't make a lot of sense... so lets just calculate the variance in the
+                #simple explicit way.
                 col_inv_var_mat = np.reshape(col_inv_var.repeat(no), (nx_cutout,no) )
                 b_mat = phi * col_inv_var_mat
                 c_mat = np.dot(phi.T,phi*col_inv_var_mat)
@@ -147,8 +158,75 @@ class Extractor():
                 extracted_var[i,j,:] = np.dot(1.0/np.maximum(col_inv_var,1e-12),pixel_weights**2)
         return extracted_flux, extracted_var
         
-    def two_d_extract(self):
-        """ Extract using 2D information. """
-        print("Not implemented")
+    def two_d_extract(self,  data, badpix=[], lenslet_profile='sim', rnoise=3.0):
+        """ Extract using 2D information. The lenslet model used is a collapsed profile, 
+        but where we take into account the slit shear/rotation.  """
+        ny = self.x_map.shape[1]
+        nm = self.x_map.shape[0]
+        nx = self.sim.szx
+        
+        #Number of "objects"
+        no = self.square_profile.shape[1]
+        extracted_flux = np.zeros( (nm,ny,no) )
+        extracted_var = np.zeros( (nm,ny,no) )
+        
+        #Assuming that the data are in photo-electrons, construct a simple model for the
+        #pixel inverse variance.
+        pixel_inv_var = 1.0/(np.maximum(data,0) + rnoise**2)
+        pixel_inv_var[badpix]=0.0
+                
+        #Loop through all orders then through all y pixels.
+        for i in range(nm):
+            print("Extracting order: {0:d}".format(i))
+            #Based on the profile we're using, create the local offsets and profile vectors
+            if lenslet_profile == 'sim':
+                offsets = self.sim_offsets[:,i]
+                profile = self.sim_profile
+            else:
+                raise userwarning
+            nx_cutout = 2*int( (np.max(offsets) - np.min(offsets))/2 ) + 2
+            ny_cutout = 2*int(nx_cutout * np.nanmax(np.abs(self.slit_tilt)) / 2) + 3
+            for j in range(ny):
+                phi = np.zeros( (ny_cutout,nx_cutout,no) )
+                #Check for NaNs
+                if self.x_map[i,j] != self.x_map[i,j]:
+                    extracted_var[i,j,:] = np.nan
+                    continue
+                #Create our column cutout for the data and the PSF
+                x_ix = int(self.x_map[i,j]) - nx_cutout//2 + np.arange(nx_cutout,dtype=int) + nx//2
+                y_ix = j + np.arange(ny_cutout, dtype=int) - ny_cutout//2
+                for k in range(no):
+                    x_prof = np.interp(x_ix - self.x_map[i,j] - nx//2, offsets, profile[:,k])
+                    y_pix = (x_ix - self.x_map[i,j] - nx//2) * self.slit_tilt[i,j] + ny_cutout//2
+                    frac_y_pix = y_pix - y_pix.astype(int)
+                    subx_ix = np.arange(nx_cutout,dtype=int)
+                    phi[y_pix.astype(int),subx_ix,k] = (1-frac_y_pix)*x_prof
+                    phi[y_pix.astype(int)+1,subx_ix,k] = frac_y_pix*x_prof
+                    phi[:,:,k] /= np.sum(phi[:,:,k])
+                #Deal with edge effects...
+                ww = np.where( (x_ix >= nx) | (x_ix < 0) )[0]
+                x_ix[ww]=0
+                phi[:,ww,:]=0.0
+                ww = np.where( (y_ix >= ny) | (y_ix < 0) )[0]
+                y_ix[ww]=0
+                phi[ww,:,:]=0.0
+                xy = np.meshgrid(y_ix, x_ix)
+                #Cut out our data and inverse variance.
+                col_data = data[xy].flatten()
+                col_inv_var = pixel_inv_var[xy].flatten()
+                #Fill in the "c" matrix and "b" vector from Sharp and Birchall equation 9
+                #Simplify things by writing the sum in the computation of "b" as a matrix
+                #multiplication. We can do this because we're content to invert the 
+                #(small) matrix "c" here. Equation 17 from Sharp and Birchall 
+                #doesn't make a lot of sense... so lets just calculate the variance in the
+                #simple explicit way.
+                col_inv_var_mat = np.reshape(col_inv_var.repeat(no), (ny_cutout*nx_cutout,no) )
+                phi = phi.reshape( (ny_cutout*nx_cutout,no) )
+                b_mat = phi * col_inv_var_mat
+                c_mat = np.dot(phi.T,phi*col_inv_var_mat)
+                pixel_weights = np.dot(b_mat,np.linalg.inv(c_mat))
+                extracted_flux[i,j,:] = np.dot(col_data,pixel_weights)
+                extracted_var[i,j,:] = np.dot(1.0/np.maximum(col_inv_var,1e-12),pixel_weights**2)
+        return extracted_flux, extracted_var
         
         
