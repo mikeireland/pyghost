@@ -16,8 +16,7 @@ incoporation into the Gemini recipe system.
 Basic Code Use
 ==============
 
-As of May 2015, this code can only easily be used by running/copying the example lines of
-code down the bottom of ghostsim.py.
+Help for each of the modules inclues the simplest lines of code needed to run them.
 
 Simulation Algorithms
 =====================
@@ -44,3 +43,23 @@ with :math:`\mathbf{s}` a unit vector perpendicular to the grating lines in the 
     \mathbf{\hat{v}} &= \mathbf{\hat{n}} \cos(\theta_o) + \mathbf{\hat{p}} \sin(theta_i),
     
 where :math: `\mathbf{\hat{n}}` is the surface normal, and `\mathbf{\hat{p}}` is a unit vector in both in the plane of the surface and in the plane defined by the input vector and surface normal.
+
+Extraction Algorithms
+=====================
+
+The extraction algorithms are based on the mathematics in Sharp and Birchall (2009) 
+(optimal extraction) and in Bolton and Schlegel (2009) (spectro-perfectionism). Neither
+algorithm is used verbatim, because of the unique data analysis challenge of a long
+fiber slit for GHOST that does not necessarily have adequate sampling. Instead, each
+wavelength in each order (corresponding a single spectral-direction pixel in the center
+of the slit image) has signal-to-noise optimal weights assigned according to the 
+algorithms in Sharp and Birchall. 
+
+Currently (July 2015), the sky and star extract very well, with equivalent widths and
+resolution consistent between 1D and 2D extraction. However, the Th/Xe fiber gives the
+same flux in 1D and 2D extraction for the flat lamp, but quite different fluxes whenever
+there is a slit tilt for the arc lines. There is also some ringing at extracted pixel
+numbers higher than 3000, and a little deconvolution ringing evident in the Th/Xe 
+2D extraction (also present, but to a lesser extent, in the 1D extraction). There 
+may to be a ~0.1 pixel error in the extraction profile, but no more than that. So these
+Th/Xe issues definitely seem to be an extraction artefact...

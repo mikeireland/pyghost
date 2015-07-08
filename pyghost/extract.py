@@ -1,11 +1,23 @@
 """Given (x,wave,matrices, slit_profile), extract the flux from each order. For 
 readability, we keep this separate from the simulator.... but the simulator is
-required in order to run this."""
+required in order to run this.
+
+To run, create a simulated fits file (e.g. "test_blue.fits") using ghostsim then:
+
+blue_high = pyghost.extract.Extractor('blue', 'high')
+flux,var = blue_high.two_d_extract("test_blue.fits")
+plt.plot(blue_high.w_map[0,:], flux[0,:,0])
+
+"""
 
 from __future__ import division, print_function
 import ghostsim
 import numpy as np
 import matplotlib.pyplot as plt
+try: 
+    import pyfits
+except:
+    import astropy.io.fits as pyfits
 import pdb
 
 class Extractor():
@@ -28,7 +40,11 @@ class Extractor():
             self.nl = 28
             ## Set default profiles - object, sky and reference
             fluxes = np.zeros( (self.nl,3) )
-            fluxes[2:2+19,0]=1.0
+            fluxes[2:21,0] = 0.37
+            fluxes[8:15,0] = 0.78
+            fluxes[11,0] = 1.0
+            #NB if on the following line, fluxes[2:,1]=1.0 is set, sky will be
+            #subtracted automatically.
             fluxes[2+19:,1]=1.0
             fluxes[0,2]=1.0
             self.define_profile(fluxes)
@@ -83,14 +99,23 @@ class Extractor():
                 im_slit=self.sim.make_lenslets(fluxes=fluxes[:,i], mode=self.mode)
                 self.sim_profile[:,i] = np.sum(im_slit, axis=0)
         
-    def one_d_extract(self, data, badpix=[], lenslet_profile='sim', rnoise=3.0):
+    def one_d_extract(self, data=[], file='', badpix=[], lenslet_profile='sim', rnoise=3.0):
         """ Extract flux by integrating down columns (the "y" direction), using an
         optimal extraction method.
         
+        Given that some of this code is in common with two_d_extract, the routines could
+        easily be merged... however that would make one_d_extract less readable.
+        
         Parameters
         ----------
-        data: numpy array
-            Image data, transposed so that dispersion is in the "y" direction. 
+        data: numpy array (optional) 
+            Image data, transposed so that dispersion is in the "y" direction. Note that
+            this is the transpose of a conventional echellogram. Either data or file
+            must be given
+            
+        file: string (optional)
+            A fits file with conventional row/column directions containing the data to be
+            extracted.
         
         lenslet_profile: 'square' or 'sim'
             Shape of the profile of each fiber as used in the extraction. For a final
@@ -101,6 +126,14 @@ class Extractor():
             The assumed readout noise.
         
         WARNING: Binning not implemented yet"""
+        
+        if len(data)==0:
+            if len(file)==0:
+                print("ERROR: Must input data or file")
+            else:
+                #Transpose the data from the start.
+                data = pyfits.getdata(file).T
+        
         ny = self.x_map.shape[1]
         nm = self.x_map.shape[0]
         nx = self.sim.szx
@@ -158,9 +191,53 @@ class Extractor():
                 extracted_var[i,j,:] = np.dot(1.0/np.maximum(col_inv_var,1e-12),pixel_weights**2)
         return extracted_flux, extracted_var
         
-    def two_d_extract(self,  data, badpix=[], lenslet_profile='sim', rnoise=3.0):
+    def two_d_extract(self, file='', data=[], badpix=[], lenslet_profile='sim', rnoise=3.0, deconvolve=True):
         """ Extract using 2D information. The lenslet model used is a collapsed profile, 
-        but where we take into account the slit shear/rotation.  """
+        in 1D but where we take into account the slit shear/rotation by interpolating this
+        1D slit profile to the nearest two pixels along each row (y-axis in code).
+        
+        One key difference to Sharp and Birchall is that c_kj (between equations 8 and 9)
+        is the correct normalisation for a (fictitious) 1-pixel wide PSF centered exactly
+        on a pixel, but not for a continuum. We normalise correctly for a continuum by
+        having one of the \phi functions being one-pixel wide along the slit, and the 
+        other being unbounded in the dispersion direction.
+        
+        Note that the input data has to be the transpose of a conventional echellogram
+       
+        TODO:
+        1) Neaten the approximate matrix inverse square root
+        
+        Parameters
+        ----------
+        data: numpy array (optional) 
+            Image data, transposed so that dispersion is in the "y" direction. Note that
+            this is the transpose of a conventional echellogram. Either data or file
+            must be given
+            
+        file: string (optional)
+            A fits file with conventional row/column directions containing the data to be
+            extracted.
+        
+        lenslet_profile: 'square' or 'sim'
+            Shape of the profile of each fiber as used in the extraction. For a final
+        implementation, 'measured' should be a possibility. 'square' assigns each
+        pixel uniquely to a single lenslet. For testing only
+        
+        rnoise: float
+            The assumed readout noise.
+            
+        deconvolve: bool
+            Do we deconvolve so that neighboring extracted spectral points 
+            are statistically independent? This is an approximate deconvolution (a linear 
+            function of 5 neighboring pixels) so is reasonably robust. """
+            
+        if len(data)==0:
+            if len(file)==0:
+                print("ERROR: Must input data or file")
+            else:
+                #Transpose the data from the start.
+                data = pyfits.getdata(file).T
+
         ny = self.x_map.shape[1]
         nm = self.x_map.shape[0]
         nx = self.sim.szx
@@ -169,6 +246,7 @@ class Extractor():
         no = self.square_profile.shape[1]
         extracted_flux = np.zeros( (nm,ny,no) )
         extracted_var = np.zeros( (nm,ny,no) )
+        extracted_covar = np.zeros( (nm,ny-1,no) )
         
         #Assuming that the data are in photo-electrons, construct a simple model for the
         #pixel inverse variance.
@@ -177,17 +255,19 @@ class Extractor():
                 
         #Loop through all orders then through all y pixels.
         for i in range(nm):
-            print("Extracting order: {0:d}".format(i))
+            print("Extracting order index: {0:d}".format(i))
             #Based on the profile we're using, create the local offsets and profile vectors
             if lenslet_profile == 'sim':
                 offsets = self.sim_offsets[:,i]
                 profile = self.sim_profile
             else:
+                print("Only sim lenslet profile available for 2D extraction so far...")
                 raise userwarning
             nx_cutout = 2*int( (np.max(offsets) - np.min(offsets))/2 ) + 2
             ny_cutout = 2*int(nx_cutout * np.nanmax(np.abs(self.slit_tilt)) / 2) + 3
             for j in range(ny):
                 phi = np.zeros( (ny_cutout,nx_cutout,no) )
+                phi1d = np.zeros( (ny_cutout,nx_cutout,no) )
                 #Check for NaNs
                 if self.x_map[i,j] != self.x_map[i,j]:
                     extracted_var[i,j,:] = np.nan
@@ -202,15 +282,18 @@ class Extractor():
                     subx_ix = np.arange(nx_cutout,dtype=int)
                     phi[y_pix.astype(int),subx_ix,k] = (1-frac_y_pix)*x_prof
                     phi[y_pix.astype(int)+1,subx_ix,k] = frac_y_pix*x_prof
-                    phi[:,:,k] /= np.sum(phi[:,:,k])
+                    phi[:,:,k] /= np.sum(phi[:,:,k])  
+                    x_prof /= np.sum(x_prof)               
+                    phi1d[:,:,k] = np.tile(x_prof,ny_cutout).reshape( (ny_cutout, nx_cutout) )
                 #Deal with edge effects...
                 ww = np.where( (x_ix >= nx) | (x_ix < 0) )[0]
                 x_ix[ww]=0
                 phi[:,ww,:]=0.0
+                phi1d[:,ww,:]=0.0
                 ww = np.where( (y_ix >= ny) | (y_ix < 0) )[0]
                 y_ix[ww]=0
                 phi[ww,:,:]=0.0
-                xy = np.meshgrid(y_ix, x_ix)
+                xy = np.meshgrid(y_ix, x_ix, indexing='ij') 
                 #Cut out our data and inverse variance.
                 col_data = data[xy].flatten()
                 col_inv_var = pixel_inv_var[xy].flatten()
@@ -222,11 +305,83 @@ class Extractor():
                 #simple explicit way.
                 col_inv_var_mat = np.reshape(col_inv_var.repeat(no), (ny_cutout*nx_cutout,no) )
                 phi = phi.reshape( (ny_cutout*nx_cutout,no) )
+                phi1d = phi1d.reshape( (ny_cutout*nx_cutout,no) )
                 b_mat = phi * col_inv_var_mat
-                c_mat = np.dot(phi.T,phi*col_inv_var_mat)
+                c_mat = np.dot(phi.T,phi1d*col_inv_var_mat)
                 pixel_weights = np.dot(b_mat,np.linalg.inv(c_mat))
+#                if (j==1000):
+#                        pdb.set_trace()
                 extracted_flux[i,j,:] = np.dot(col_data,pixel_weights)
                 extracted_var[i,j,:] = np.dot(1.0/np.maximum(col_inv_var,1e-12),pixel_weights**2)
-        return extracted_flux, extracted_var
+                if (j > 0):
+                    extracted_covar[i,j-1,:] = np.dot(1.0/np.maximum(col_inv_var,1e-12),pixel_weights* \
+                        np.roll(last_pixel_weights,-nx_cutout, axis=0))
+                last_pixel_weights = pixel_weights.copy()
+#                if (j > 591):
+#                    pdb.set_trace()
+        if (deconvolve):
+            #Create the diagonals of the matrix Q gradually, using the Taylor approximation for
+            #the matrix inverse.
+            #(Bolton and Schlegel 2009, equation 10)
+            #D = diag(C)
+            #A = D^{-1/2} (C-D) D^{-1/2}, so C = D^{1/2}(I + A)D^{1/2}
+            #Then if Q = (I - 1/2 A + 3/8 A^2) D^{-1/2}
+            #... then C^{-1} = QQ, approximately.
+            #Note that all of this effort doesn't really seem to achieve much at all in practice...
+            #an extremely marginal improvement in resolution... but at least formal pixel-to-pixel
+            #data independence is returned.
+            extracted_sig = np.sqrt(extracted_var)
+            a_diag_p1 = extracted_covar/extracted_sig[:,:-1,:]/extracted_sig[:,1:,:]
+#            a_diag_m1 = extracted_covar/extracted_var[:,1:,:]
+            Q_diag = np.ones( (nm,ny,no) )
+            Q_diag[:,:-1,:] += 3/8.0*a_diag_p1**2
+            Q_diag[:,1:,:]  += 3/8.0*a_diag_p1**2
+#            Q_diag[:,:-1,:] += 3/8.0*a_diag_p1*a_diag_m1
+#            Q_diag[:,1:,:]  += 3/8.0*a_diag_p1*a_diag_m1
+            Q_diag /= extracted_sig
+            extracted_sqrtsig = np.sqrt(extracted_sig)
+            Q_diag_p2 = 3/8.0*a_diag_p1[:,:-1,:]*a_diag_p1[:,1:,:]/extracted_sqrtsig[:,2:,:]/extracted_sqrtsig[:,:-2,:]
+#            Q_diag_m2 = 3/8.0*a_diag_m1[:,:-1,:]*a_diag_m1[:,1:,:]/extracted_sig[:,:-2,:]
+#            Q_diag_m1 = -0.5*a_diag_m1/extracted_sig[:,:-1,:]
+            Q_diag_p1 = -0.5*a_diag_p1/extracted_sqrtsig[:,1:,:]/extracted_sqrtsig[:,:-1,:]
+    #The approximation doesn't seem to be quite right, with the ~3% uncertainty on the diagonal of cinv, when there should
+    #only be a ~1% uncertainty (obtained by going to the next term in the Taylor expansion). But pretty close...
+    #Q = np.diag(Q_diag[0,:,0]) + np.diag(Q_diag_m1[0,:,0],k=-1) + np.diag(Q_diag_p1[0,:,0],k=+1) + np.diag(Q_diag_p2[0,:,0],k=+2) + np.diag(Q_diag_m2[0,:,0],k=-2)
+    #cinv_approx = np.dot(Q,Q)
+    #cinv = np.diag(extracted_var[0,:,0]) + np.diag(extracted_covar[0,:,0],k=1) + np.diag(extracted_covar[0,:,0],k=-1)
+    #cinv = np.linalg.inv(cinv)
+            #Now we have a sparse matrix with 5 terms. We need to sum down the rows, ignoring the 
+            #edge pixels
+#            s_vect = Q_diag[:,2:-2,:] + Q_diag_p1[:,1:-2,:] + Q_diag_m1[:,2:-1,:] + Q_diag_p2[:,:-2,:] + Q_diag_m2[:,2:,:]
+            s_vect = Q_diag.copy()
+            s_vect[:,:-1,:] += Q_diag_p1
+            s_vect[:,:-2,:] += Q_diag_p2
+            s_vect[:,1:,:] += Q_diag_p1
+            s_vect[:,2:,:] += Q_diag_p2
+            new_var = 1.0/s_vect**2
+            new_flux = extracted_flux*Q_diag/s_vect
+            new_flux[:,:-1,:] += extracted_flux[:,1:,:]*Q_diag_p1/s_vect[:,1:,:]
+            new_flux[:,:-2,:] += extracted_flux[:,2:,:]*Q_diag_p2/s_vect[:,2:,:]
+            new_flux[:,1:,:] += extracted_flux[:,:-1,:]*Q_diag_p1/s_vect[:,:-1,:]
+            new_flux[:,2:,:] += extracted_flux[:,:-2,:]*Q_diag_p2/s_vect[:,:-2,:]
+            
+            #Fill in the Variance and Flux arrays with NaNs, so that the (not computed) edges 
+            #are undefined.
+ #           new_flux = np.empty_like(extracted_flux)
+ #           new_var = np.empty_like(extracted_var)
+ #           new_flux[:,:,:]=np.nan
+ #           new_var[:,:,:]=np.nan
+            #Now fill in the arrays.
+ #           new_var[:,2:-2,:] = 1.0/s_vect**2
+ #           new_flux[:,2:-2,:] =  extracted_flux[:,2:-2,:]*Q_diag[:,2:-2,:]/s_vect 
+            #
+ #           new_flux[:,2:-2,:] += extracted_flux[:,1:-3,:]*Q_diag_p1[:,1:-2,:]/s_vect
+ #           new_flux[:,2:-2,:] += extracted_flux[:,3:-1,:]*Q_diag_p1[:,2:-1,:]/s_vect
+ #           new_flux[:,2:-2,:] += extracted_flux[:,:-4,:] *Q_diag_p2[:,:-2,:]/s_vect
+ #           new_flux[:,2:-2,:] += extracted_flux[:,4:,:]  *Q_diag_p2[:,2:,:]/s_vect
+            
+            return new_flux, new_var
+        else:
+            return extracted_flux, extracted_var
         
         

@@ -8,8 +8,8 @@ images are returned/displayed with a vertical slit and a horizontal dispersion d
 
 For a simple simulation, run:
 
-import ghostsim
-blue = ghostsim.ARM('blue')
+import pyghost
+blue = pyghost.ghostsim.Arm('blue')
 blue.simulate_frame()
 """
 
@@ -409,7 +409,7 @@ class Arm():
             """
             #If no input spectrum, use the sun.
             if len(spectrum)==0:
-                d =pyfits.getdata(os.path.join(os.path.dirname(os.path.abspath(__file__),'data/ardata.fits.gz')))
+                d =pyfits.getdata(os.path.join(os.path.dirname(os.path.abspath(__file__)),'data/ardata.fits.gz'))
                 spectrum=np.array([np.append(0.35,d['WAVELENGTH'])/1e4,np.append(0.1,d['SOLARFLUX'])])
             nm = x.shape[0]
             ny = x.shape[1]
@@ -441,7 +441,7 @@ class Arm():
             return image
         
     def simulate_frame(self, output_prefix='test_', xshift=0.0, yshift=0.0, rv=0.0, 
-        rv_thar=0.0, flux=1e2, rnoise=3.0, gain=1.0, use_thar=True, mode='high', return_image=False):
+        rv_thar=0.0, flux=1e2, rnoise=3.0, gain=1.0, use_thar=True, mode='high', return_image=False, thar_flatlamp=False):
         """Simulate a single frame. 
         
         TODO (these can be implemented manually using the other functions): 
@@ -500,14 +500,18 @@ class Arm():
             if (use_thar):
                 #Create an appropriately convolved Thorium-Argon spectrum after appropriately
                 #convolving.
-                thar = np.loadtxt(os.path.join(os.path.dirname(os.path.abspath(__file__),'data/mnras0378-0221-SD1.txt')),usecols=[0,1,2])
+                thar = np.loadtxt(os.path.join(os.path.dirname(os.path.abspath(__file__)),'data/mnras0378-0221-SD1.txt'),usecols=[0,1,2])
                 thar_wave = 3600 * np.exp(np.arange(5e5)/5e5)
                 thar_flux = np.zeros(5e5)
                 ix = (np.log(thar[:,1]/3600)*5e5).astype(int)
                 ix = np.minimum(np.maximum(ix,0),5e5-1).astype(int)
                 thar_flux[ ix ] = 10**(np.minimum(thar[:,2],4))
                 thar_flux = np.convolve(thar_flux,[0.2,0.5,0.9,1,0.9,0.5,0.2],mode='same')
+                #Make the peak flux equal to 10
                 thar_flux /= 0.1*np.max(thar_flux)
+                #Include an option to assume the Th/Ar fiber is connected to a flat lamp
+                if thar_flatlamp:
+                    thar_flux[:]=10
                 thar_spect = np.array([thar_wave/1e4,thar_flux])
                 #Now that we have our spectrum, create the Th/Ar image.
                 slit_fluxes = np.ones(1)
