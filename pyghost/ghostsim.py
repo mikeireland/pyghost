@@ -9,7 +9,9 @@ images are returned/displayed with a vertical slit and a horizontal dispersion d
 For a simple simulation, run:
 
 import pyghost
+
 blue = pyghost.ghostsim.Arm('blue')
+
 blue.simulate_frame()
 """
 

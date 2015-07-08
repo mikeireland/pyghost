@@ -5,7 +5,9 @@ required in order to run this.
 To run, create a simulated fits file (e.g. "test_blue.fits") using ghostsim then:
 
 blue_high = pyghost.extract.Extractor('blue', 'high')
+
 flux,var = blue_high.two_d_extract("test_blue.fits")
+
 plt.plot(blue_high.w_map[0,:], flux[0,:,0])
 
 """

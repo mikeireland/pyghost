@@ -10,4 +10,4 @@ Welcome to the documentation for pyghost!
 
    intro
    ghostsim
-
+   extract
